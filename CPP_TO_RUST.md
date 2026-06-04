@@ -262,16 +262,25 @@ before the consumer thread. The program hung immediately on every run.
 
 **Root cause:**
 
-The producer begins by sending an initial order book snapshot — all 100 price levels, both
-sides, for every symbol. With 3 symbols that is `100 × 2 × 3 = 600` events pushed to the
-channel before the main generate loop begins. The channel capacity is 256.
+`start()` was written to spawn the producer thread first, then the consumer thread.
+The producer's first action is sending an initial order book snapshot — 100 price levels,
+both sides, for every symbol. With 3 symbols: `100 × 2 × 3 = 600` events.
+
+The channel capacity is 256. The producer blocks on the 257th send. Because the producer
+thread is stuck inside `populate_and_init_books()`, `start()` never returns to the line
+that spawns the consumer. The consumer is never created. Nobody drains the channel.
 
 ```
-Producer spawned first:
-  populate_and_init_books() → sends 600 QuoteUpdates
-  channel fills at 256      → sender BLOCKS
-  consumer not started yet  → nobody drains the channel
-  → deadlock
+start() {
+    spawn producer thread {
+        populate_and_init_books()  // sends 600 events
+            → channel full at 256
+            → send() BLOCKS
+            → thread stuck here forever
+    }
+    // ← never reached
+    spawn consumer thread          // consumer never spawned
+}
 ```
 
 The fix: spawn the consumer thread first, then the producer.
@@ -288,21 +297,25 @@ let producer = thread::spawn(move || {
 With the consumer already running, it drains as fast as the producer fills. The channel
 never stays full for long and the snapshot completes without blocking.
 
-**Why this matters:**
+**Does Rust prevent this?**
 
-This is a class of bug that neither language protects against — it is a design constraint,
-not a type error. The bounded channel is the correct tool for backpressure, but it requires
-the consumer to be live before the producer starts sending at burst volume.
+No. This is a design constraint, not a type error. Neither language can enforce
+"consumer must be running before producer sends". The compiler has no model of
+thread initialization order.
 
-The C++ implementation got this right in `SimulationEngine::start()`:
+What Rust *did* do: make the failure **immediate and obvious**. A bounded channel
+blocks on the 257th send. An unbounded queue would have let the producer run freely,
+silently allocating memory until the process was killed or the machine ran out of RAM —
+a much harder bug to diagnose.
+
+The C++ implementation had the correct order:
 ```cpp
 output_sink_.start();                                          // consumer first
 producer_thread_ = std::thread(&SimulationEngine::producer_loop, this); // producer second
 ```
 
-During the Rust port, that ordering was initially reversed. The deadlock surfaced immediately
-in testing — bounded channels make this failure mode obvious, whereas with an unbounded queue
-the same ordering mistake would silently consume memory instead.
+That ordering was lost during the port. The deadlock surfaced in the first test run.
+Bounded queues fail fast — which is why they are the right default for production systems.
 
 ---
 
