@@ -1,104 +1,144 @@
-# Learning Rust — From C++ to Rust
+# Migrating a C++ Systems Project to Rust
 
-A practical guide anchored to **this project's code**. Every concept maps to a file you can open right now.
+This document reflects on porting a synthetic market data simulator from C++ to Rust.
+The C++ version is at [Enki — Market Data (C++)](https://github.com/oren-hadry/enki-market-data).
+This repo is the Rust port.
+
+The project is a two-thread producer/consumer pipeline: a generator pushes synthetic order-book
+events through a bounded queue to a consumer that rate-limits and writes CSV to stdout.
 
 ---
 
-## 1. Ownership — the biggest mental shift
+## Why Port to Rust?
 
-In C++ you manage memory manually (or via RAII). In Rust the compiler enforces RAII automatically through **ownership rules**:
+The C++ implementation is correct, but several safety properties rely on discipline rather than
+compiler enforcement:
 
-- Every value has exactly **one owner**
-- When the owner goes out of scope, the value is dropped (destructor called)
-- You can **move** ownership or **borrow** it temporarily
+- The signal handler stores a raw `g_engine*` pointer that could dangle
+- Thread closures capture `this` by reference with no lifetime verification
+- `std::map<double>` as a price key relies on the assumption that NaN never appears
+- Thread safety of the `running_` flag is documented, not enforced
 
-### C++ (this project)
+Rust eliminates each of these by making them compile errors rather than runtime bugs.
+The performance characteristics are identical — both compile to native code with no GC.
+
+---
+
+## Key Migrations
+
+### 1. Raw pointer in signal handler → Arc
+
+**C++**
 ```cpp
-// simulation_engine.cpp
-SimulationEngine engine(config);  // engine owns everything
-engine.start();                   // spawns threads — engine still owns them
-// engine goes out of scope → destructor joins threads
-```
+static SimulationEngine* g_engine = nullptr;
 
-### Rust (this project — `src/engine.rs`)
-```rust
-let mut engine = SimulationEngine::new(config);
-engine.start();
-// engine goes out of scope → Drop::drop() calls stop() → joins threads
-```
+static void handle_sigint(int) {
+    if (g_engine) g_engine->stop(); // dangling pointer if engine was destroyed first
+}
 
-**Identical behavior. But in Rust, forgetting to join threads is a compile error if you try to share non-Send data. In C++ it's silent UB.**
-
----
-
-## 2. Move semantics
-
-In C++, move semantics are opt-in (`std::move`). In Rust, **everything is move by default**.
-
-### C++ vs Rust
-
-```cpp
-// C++: copy by default, move is explicit
-std::string a = "hello";
-std::string b = std::move(a);  // a is now empty (but still valid)
-```
-
-```rust
-// Rust: move by default — no copy unless you call .clone()
-let a = String::from("hello");
-let b = a;          // a is MOVED — using a after this is a compile error
-let c = b.clone();  // explicit copy
-```
-
-### In this project (`src/engine.rs`)
-
-```rust
-let config_p = self.config.clone();   // explicit copy for producer thread
-let config_c = self.config.clone();   // explicit copy for consumer thread
-
-let producer = thread::spawn(move || {
-    // `move` transfers ownership of config_p, running_p, tx into this closure
-    // trying to use config_p after this line = compile error
-});
-```
-
-The `move` keyword on a closure = the Rust equivalent of capturing by value in a C++ lambda `[=]`, but the compiler tracks exactly what was moved and prevents double-use.
-
----
-
-## 3. Borrowing — references without pointers
-
-Rust has references (`&T` and `&mut T`) but **no raw pointers in safe code**.
-
-Rules:
-- Any number of `&T` (shared/read-only) references at once, OR
-- Exactly ONE `&mut T` (exclusive/write) reference at once
-- Never both at the same time
-
-```rust
-// src/books_manager.rs
-pub fn process_event(&mut self, event: &MarketEvent) {
-    //                 ^mut self = exclusive access    ^&T = read-only borrow
-    if let Some(book) = self.books.get_mut(&event.symbol) {
-        book.handle_event(event.side, event.id, event.price, event.size, event.ts);
-    }
+int main() {
+    SimulationEngine engine(config);
+    g_engine = &engine;             // raw pointer — no lifetime tracking
+    ...
 }
 ```
 
-**C++ equivalent:** `void process_event(const MarketEvent& event)` on a non-const method. In Rust, the compiler enforces this at every call site — no accidental aliased mutation.
+**Rust** (`src/main.rs`, `src/engine.rs`)
+```rust
+let mut engine = SimulationEngine::new(config);
+let running = engine.running_flag(); // returns Arc<AtomicBool> — clones the ref count
+
+ctrlc::set_handler(move || {
+    running.store(false, Ordering::SeqCst);
+    // Arc guarantees the allocation lives as long as any clone exists
+})?;
+```
+
+`Arc<T>` is reference-counted atomic shared ownership. The signal handler holds a clone of
+the Arc — the underlying `AtomicBool` is guaranteed to be alive. No null check, no dangling
+pointer, enforced by the type system.
 
 ---
 
-## 4. Traits — abstract interfaces
+### 2. Thread closures — capture discipline → compiler enforcement
 
-Rust `trait` = C++ pure virtual class. But:
-- No inheritance (no `class Derived : public Base`)
-- Implemented separately from the struct definition
-- Compiler resolves dispatch at monomorphization (like templates) or via vtable (`dyn Trait`)
-
-### C++ (this project)
+**C++**
 ```cpp
-// sink.hpp
+// simulation_engine.cpp — captures `this` by reference
+auto push_fn = [this](const QuoteUpdate& q) {
+    while (!output_queue_.try_push(q)) CPU_PAUSE();
+};
+// If `engine` is destroyed while push_fn is in use: undefined behavior
+```
+
+**Rust** (`src/engine.rs`)
+```rust
+let producer = thread::spawn(move || {
+    // `move` transfers ownership of generator, books, running_p into the thread
+    // The compiler rejects any non-'static borrow crossing the thread boundary
+    while running_p.load(Ordering::Relaxed) {
+        books.process_event(&generator.generate_next());
+    }
+});
+```
+
+`thread::spawn` requires `'static + Send`. This makes it a **compile error** to capture a
+borrowed reference that could outlive the thread. In C++, the same mistake is silent UB.
+
+---
+
+### 3. Hand-rolled SPSC queue → crossbeam bounded channel
+
+**C++** — 60-line custom lock-free queue with `alignas(64)`, bitmask index, `CPU_PAUSE()`.
+
+**Rust** — one line:
+```rust
+let (tx, rx) = crossbeam_channel::bounded::<QuoteUpdate>(256);
+```
+
+`crossbeam::bounded` is a battle-tested, lock-free bounded channel with identical semantics:
+blocks the sender when full (natural backpressure), `try_recv` for spin-wait on the consumer.
+`Sender<T>` is `Clone + Send` — multiple senders to the same channel without a mutex.
+
+The custom C++ queue was necessary because the standard library lacks a bounded SPSC channel.
+In Rust, `crossbeam-channel` is the de facto standard and is maintained by the concurrency
+working group.
+
+---
+
+### 4. std::map\<double\> → BTreeMap\<OrderedFloat\<f64\>\>
+
+**C++**
+```cpp
+std::map<double, BookLevel> levels_; // works — operator< is defined for double
+```
+
+**Rust** — this does not compile:
+```rust
+BTreeMap<f64, BookLevel> // ERROR: f64 does not implement Ord
+```
+
+Rust requires `Ord` (total ordering) for map keys. `f64` does not implement `Ord` because
+`NaN != NaN` — floating-point has no total order. The C++ version assumes NaN never appears;
+the Rust version forces an explicit decision:
+
+```rust
+use ordered_float::OrderedFloat;
+
+BTreeMap<OrderedFloat<f64>, BookLevel>
+
+// OrderedFloat<f64> implements Ord — NaN is treated as greater than any other value
+self.levels.insert(OrderedFloat(price), BookLevel { size, id });
+```
+
+This surfaces a real assumption that existed silently in the C++ code.
+
+---
+
+### 5. ISink virtual class → Sink trait
+
+**C++**
+```cpp
 class ISink {
 public:
     virtual ~ISink() = default;
@@ -106,12 +146,13 @@ public:
 };
 
 class StdoutSink : public ISink {
-public:
     void consume(const QuoteUpdate& q) override;
 };
+
+std::vector<std::unique_ptr<ISink>> sinks_;
 ```
 
-### Rust (this project — `src/sink.rs`)
+**Rust** (`src/sink.rs`, `src/engine.rs`)
 ```rust
 pub trait Sink: Send {
     fn consume(&mut self, q: &QuoteUpdate);
@@ -119,291 +160,174 @@ pub trait Sink: Send {
 
 pub struct StdoutSink;
 
-impl Sink for StdoutSink {     // implementation is separate from the struct
-    fn consume(&mut self, q: &QuoteUpdate) {
-        println!("{},{},{},{:.5},{:.4},{}", ...);
-    }
+impl Sink for StdoutSink {
+    fn consume(&mut self, q: &QuoteUpdate) { println!("{},{},…", q.ts, q.symbol); }
 }
+
+let sinks: Vec<Box<dyn Sink>> = vec![Box::new(StdoutSink)];
 ```
 
-### Static vs dynamic dispatch
+`Box<dyn Sink>` = `unique_ptr<ISink>`. The `Send` supertrait means the compiler verifies
+every `Sink` implementation is safe to send to the consumer thread — no annotation required
+on each call site.
 
-```cpp
-// C++: always dynamic dispatch via vtable for virtual functions
-std::unique_ptr<ISink> sink = std::make_unique<StdoutSink>();
-sink->consume(q);  // vtable lookup
-```
-
-```rust
-// Rust: you choose
-let sink: Box<dyn Sink> = Box::new(StdoutSink);  // dyn = vtable (same as C++ virtual)
-sink.consume(&q);
-
-// OR: static dispatch (compiler generates specialized code, zero overhead)
-fn dispatch<S: Sink>(sink: &mut S, q: &QuoteUpdate) { sink.consume(q); }
-```
-
-In this project we use `Box<dyn Sink>` in `engine.rs` — equivalent to C++ `unique_ptr<ISink>`.
+Traits differ from C++ virtual classes in one key way: **no inheritance**. A type can implement
+multiple traits but cannot extend another struct. Shared behavior composes through traits, not
+class hierarchies.
 
 ---
 
-## 5. Option and Result — no null, no exceptions
+### 6. Exceptions and nulls → Result and Option
 
-C++ uses:
-- `nullptr` for missing values → potential segfault
-- Exceptions for errors → invisible control flow
-
-Rust uses:
-- `Option<T>` = value present (`Some(T)`) or absent (`None`)
-- `Result<T, E>` = success (`Ok(T)`) or error (`Err(E)`)
-
-The compiler forces you to handle both cases.
-
-### Option (this project — `src/engine.rs`)
-```rust
-// Option::take() extracts the JoinHandle, leaving None in its place
-if let Some(t) = self.producer.take() {
-    t.join().expect("producer panicked");
-}
-// if producer is None (not started), the if block is skipped — no null check needed
-```
-
-C++ equivalent:
-```cpp
-if (producer_thread_.joinable()) {
-    producer_thread_.join();
-}
-```
-
-### Result (this project — `src/config.rs`)
-```rust
-pub fn parse_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("cannot open config: {e}"))?;
-    //                                                    ^ ? = return Err early (like throw)
-    ...
-    Ok(Config { ... })
-}
-```
-
-C++ equivalent:
+**C++**
 ```cpp
 Config parse_config(const std::string& path) {
     std::ifstream f(path);
-    if (!f) throw std::runtime_error("cannot open config: " + path);
+    if (!f) throw std::runtime_error("cannot open: " + path);
     ...
-    return cfg;
 }
+// caller may or may not catch — nothing in the signature says this throws
 ```
 
-The `?` operator is syntactic sugar for "if Err, return it; if Ok, unwrap the value". Like `throw` but explicit at every call site.
+**Rust** (`src/config.rs`)
+```rust
+pub fn parse_config(path: &str) -> Result<Config, Box<dyn Error>> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("cannot open {path}: {e}"))?;
+    ...
+    Ok(Config { ... })
+}
+// the signature advertises that this can fail — caller is forced to handle it
+```
+
+`Result<T, E>` makes fallibility part of the type signature. The `?` operator propagates
+errors up the call stack (equivalent to `throw`), but it is **explicit at each site** — a
+reader can see exactly where errors can originate.
+
+`Option<T>` replaces nullable pointers:
+```rust
+// engine.rs — join without a null check
+if let Some(t) = self.producer.take() {
+    t.join().expect("producer panicked");
+}
+```
+`Option::take()` extracts the value and leaves `None` in its place — same pattern as
+`std::exchange(ptr, nullptr)` in C++, but enforced.
 
 ---
 
-## 6. Pattern matching — match is more than switch
+### 7. Thread safety — convention → type system
 
-`match` in Rust is like C++ `switch` but:
-- Works on any type (enums, structs, tuples, ranges)
-- Must be exhaustive — compiler errors if you miss a case
-- Can destructure and bind values in one step
+In C++, thread safety is documented. In Rust, it is enforced by two marker traits:
 
-### In this project (`src/engine.rs`)
+| Trait | Meaning |
+|-------|---------|
+| `Send` | Safe to transfer ownership to another thread |
+| `Sync` | Safe to share a reference across threads simultaneously |
+
 ```rust
-match rx.try_recv() {
-    Ok(q) => {
-        // process the quote update
-    }
-    Err(crossbeam_channel::TryRecvError::Empty) => {
-        if !running_c.load(Ordering::Relaxed) { break; }
-        std::hint::spin_loop();
-    }
-    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
-}
+// Rc<T> is NOT Send — single-threaded reference counting
+let data = Rc::new(42);
+thread::spawn(move || println!("{data}")); // COMPILE ERROR
+
+// Arc<T> IS Send — atomic reference counting
+let data = Arc::new(42);
+thread::spawn(move || println!("{data}")); // OK
 ```
 
-C++ equivalent with `if/else` and manual enum checks. The Rust compiler would reject this if you forgot the `Disconnected` arm.
-
-### Enum pattern matching (`src/book_side.rs`)
-```rust
-let key = match self.side {
-    Side::Bid => *self.levels.keys().next().unwrap(),      // lowest price
-    Side::Ask => *self.levels.keys().next_back().unwrap(), // highest price
-};
-```
+Every type that crosses a thread boundary in this project — `InputGenerator`, `Sink`,
+`Arc<AtomicBool>` — is verified `Send` by the compiler at `thread::spawn`. In C++, using
+`std::shared_ptr` in a signal handler without synchronization is UB and compiles without warning.
 
 ---
 
-## 7. Closures + thread::spawn
+## Ownership Model Comparison
 
-C++ lambdas and Rust closures are similar, but Rust's capture semantics are enforced by the compiler.
+| C++ concept | Rust equivalent | Difference |
+|-------------|-----------------|------------|
+| Stack variable (RAII) | Owned value | Rust tracks moves; C++ allows accidental copies |
+| `std::unique_ptr<T>` | `Box<T>` | Identical ownership semantics |
+| `std::shared_ptr<T>` | `Arc<T>` | Rust's `Arc` is always thread-safe; no `shared_ptr` equivalent for single-threaded (`Rc<T>`) |
+| `const T&` | `&T` | Rust enforces: no `&mut T` coexists with any `&T` |
+| `T&` | `&mut T` | Rust enforces: only one `&mut T` at a time |
+| `virtual void f() = 0` | `fn f(&mut self)` in a `trait` | Rust traits have no inheritance |
+| `[[nodiscard]]` + exceptions | `Result<T, E>` | Rust enforces handling at the type level |
 
-### C++ (this project)
-```cpp
-auto push_fn = [this](const QuoteUpdate& q) {
-    while (!output_queue_.try_push(q)) CPU_PAUSE();
-};
+---
+
+## A Real Bug: Producer Initialized Before Consumer → Deadlock
+
+During development, the engine's `start()` method was written to spawn the producer thread
+before the consumer thread. The program hung immediately on every run.
+
+**Root cause:**
+
+The producer begins by sending an initial order book snapshot — all 100 price levels, both
+sides, for every symbol. With 3 symbols that is `100 × 2 × 3 = 600` events pushed to the
+channel before the main generate loop begins. The channel capacity is 256.
+
 ```
-Captures `this` by reference — if the engine is destroyed while the lambda is still alive, UB.
+Producer spawned first:
+  populate_and_init_books() → sends 600 QuoteUpdates
+  channel fills at 256      → sender BLOCKS
+  consumer not started yet  → nobody drains the channel
+  → deadlock
+```
 
-### Rust (this project — `src/engine.rs`)
+The fix: spawn the consumer thread first, then the producer.
+
 ```rust
+// engine.rs — correct order
+let consumer = thread::spawn(move || { /* drain channel */ });
 let producer = thread::spawn(move || {
-    // move = take ownership of everything captured
-    // trying to use a non-Send type here = compile error
-    while running_p.load(Ordering::Relaxed) {
-        let event = generator.generate_next();
-        books.process_event(&event);
-    }
+    books.populate_and_init_books(&config_p, tx); // sends 600 events
+    loop { /* generate */ }
 });
 ```
 
-`thread::spawn` requires the closure to be `'static` (no borrowed references that could dangle) and `Send` (safe to send to another thread). The compiler enforces this — you cannot accidentally capture a `&T` reference that outlives the thread.
+With the consumer already running, it drains as fast as the producer fills. The channel
+never stays full for long and the snapshot completes without blocking.
 
----
+**Why this matters:**
 
-## 8. Arc + AtomicBool — shared state between threads
+This is a class of bug that neither language protects against — it is a design constraint,
+not a type error. The bounded channel is the correct tool for backpressure, but it requires
+the consumer to be live before the producer starts sending at burst volume.
 
-### C++ (original project)
+The C++ implementation got this right in `SimulationEngine::start()`:
 ```cpp
-// global raw pointer — signal handler stores it
-static SimulationEngine* g_engine = nullptr;
-
-static void handle_sigint(int) {
-    if (g_engine) g_engine->stop();  // could dangle if engine was destroyed
-}
+output_sink_.start();                                          // consumer first
+producer_thread_ = std::thread(&SimulationEngine::producer_loop, this); // producer second
 ```
 
-### Rust (this project — `src/engine.rs` + `src/main.rs`)
-```rust
-// Arc = atomically reference-counted pointer (like shared_ptr, but thread-safe)
-let running: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-
-// Clone the Arc — increments ref count, shares the same allocation
-let running_for_ctrlc = running.clone();
-
-ctrlc::set_handler(move || {
-    running_for_ctrlc.store(false, Ordering::SeqCst);
-    // Arc guarantees the AtomicBool is alive as long as any Arc clone exists
-});
-```
-
-**Rule of thumb:**
-| C++ | Rust |
-|-----|------|
-| `std::shared_ptr<T>` | `Arc<T>` (thread-safe) |
-| `std::unique_ptr<T>` | `Box<T>` |
-| `std::atomic<bool>` | `AtomicBool` |
-| `std::mutex` | `Mutex<T>` (wraps the data, not a lock) |
+During the Rust port, that ordering was initially reversed. The deadlock surfaced immediately
+in testing — bounded channels make this failure mode obvious, whereas with an unbounded queue
+the same ordering mistake would silently consume memory instead.
 
 ---
 
-## 9. The BTreeMap / OrderedFloat trick
+## What Rust Did Not Change
 
-### Why `std::map<double>` works in C++
+The performance-critical design decisions from the C++ version are preserved unchanged:
 
-C++ `std::map` uses `operator<` which is defined for `double` (IEEE 754 ordering, NaN excluded in practice).
+- **Bounded queue** — same capacity (256), same backpressure semantics
+- **Rate profiles** — sine, constant, burst, ramp — identical math
+- **Order book logic** — `BTreeMap` (sorted) + `HashMap` reverse map (O(1) id→price lookup)
+- **Drain on shutdown** — consumer drains remaining events after `running` goes false
+- **CSV output format** — identical wire format, same precision (`{:.5}` price, `{:.4}` size)
 
-### Why `BTreeMap<f64>` fails in Rust
-
-Rust requires `Ord` trait (total ordering) for map keys. `f64` does **not** implement `Ord` because `NaN != NaN` — no total order exists.
-
-### Fix (`src/book_side.rs`)
-```rust
-use ordered_float::OrderedFloat;
-
-// OrderedFloat<f64> implements Ord by treating NaN as greater than everything
-levels: BTreeMap<OrderedFloat<f64>, BookLevel>
-
-// Insert
-self.levels.insert(OrderedFloat(price), level);
-
-// Access inner f64
-let price: f64 = key.0;
-```
-
-This is Rust making a footgun explicit. In C++ you'd get NaN-related bugs silently; in Rust you're forced to decide what NaN means before the code compiles.
+The port is a language change, not an architecture change.
 
 ---
 
-## 10. impl vs class — no inheritance
+## Summary
 
-Rust has no class hierarchy. Instead:
+Porting this project from C++ to Rust required solving four concrete problems:
 
-```rust
-// Define data
-pub struct RateController {
-    profile: RateProfile,
-    base_rate: f64,
-    ...
-}
+1. **Signal handler safety** — replaced raw pointer with `Arc`
+2. **Thread closure safety** — `move` closures with compiler-verified `Send` bounds
+3. **Map key correctness** — `OrderedFloat<f64>` forces an explicit decision about NaN
+4. **Error propagation** — `Result<T, E>` makes fallibility visible in every function signature
 
-// Add methods — can be in a different file or crate
-impl RateController {
-    pub fn new(profile: RateProfile, base_rate: f64, max_rate: f64) -> Self { ... }
-    pub fn sleep_duration(&mut self) -> Duration { ... }
-}
-
-// Add trait implementation
-impl Drop for SimulationEngine {
-    fn drop(&mut self) { self.stop(); }
-}
-```
-
-`Self` in a `new` function = the type being constructed. Convention: `new` is the constructor name (not enforced, just idiomatic).
-
----
-
-## 11. Cargo vs CMake
-
-| CMake | Cargo |
-|-------|-------|
-| `CMakeLists.txt` | `Cargo.toml` |
-| `cmake -B build && cmake --build build` | `cargo build` |
-| `cmake --build build --config Release` | `cargo build --release` |
-| `find_package(jsoncpp)` | add `serde_json = "1"` to `[dependencies]` |
-| `target_link_libraries(...)` | automatic — cargo handles it |
-| `./build/market_data config.json` | `cargo run -- config.json` |
-
-No manual linker flags, no pkg-config, no brew prefix paths. Cargo downloads and compiles all dependencies.
-
----
-
-## 12. The Send + Sync traits — thread safety in the type system
-
-Two marker traits that the compiler checks automatically:
-
-| Trait | Meaning | C++ equivalent |
-|-------|---------|---------------|
-| `Send` | Safe to move to another thread | "you remembered to not share it" |
-| `Sync` | Safe to access from multiple threads simultaneously | "you remembered to add a mutex" |
-
-In C++, thread safety is a comment or convention. In Rust it's enforced:
-
-```rust
-// This will NOT compile:
-let data = Rc::new(42);  // Rc is NOT Send (not thread-safe ref counting)
-thread::spawn(move || {
-    println!("{}", data);  // ERROR: Rc cannot be sent between threads safely
-});
-
-// This compiles:
-let data = Arc::new(42);  // Arc IS Send (atomic ref counting)
-thread::spawn(move || {
-    println!("{}", data);  // OK
-});
-```
-
-In this project, every type that crosses a thread boundary (`InputGenerator`, `Sink`, `Arc<AtomicBool>`) is required to be `Send`. The compiler verifies this at `thread::spawn`.
-
----
-
-## Learning Path
-
-1. **Read** [The Rust Book](https://doc.rust-lang.org/book/) — free online, chapters 4 (ownership), 10 (traits), 16 (concurrency) are the most relevant
-2. **Open** `src/book_side.rs` — study the BTreeMap + Sender pattern
-3. **Open** `src/engine.rs` — study Arc, thread::spawn, move closures, Drop
-4. **Open** `src/config.rs` — study Result and the `?` operator
-5. **Modify** `src/sink.rs` — add a `FileSink` that writes to a file instead of stdout
-6. **Add** a second symbol in config and trace the event flow through all files
-
-The best way to learn Rust is to let the compiler teach you — write something, read the error, fix it. The errors are intentionally descriptive.
+In each case, Rust did not change what the code *does* — it changed what the compiler
+*accepts*. The bugs that were previously possible but unlikely become impossible to express.
