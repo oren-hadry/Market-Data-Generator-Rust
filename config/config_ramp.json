@@ -1,0 +1,12 @@
+{
+  "data_mode": "synthetic",
+  "symbols": ["BTCUSD", "ETHUSD", "ETHBTC"],
+  "rate_profile": "ramp",
+  "base_rate": 100.0,
+  "max_rate": 10000.0,
+  "initial_mid_prices": {
+    "BTCUSD": 65000.0,
+    "ETHUSD": 3400.0,
+    "ETHBTC": 0.052
+  }
+}

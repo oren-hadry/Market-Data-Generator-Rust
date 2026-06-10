@@ -84,3 +84,122 @@ impl BookSide {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::unbounded;
+
+    const SYM: &str = "BTCUSD";
+    const TS: u64 = 1000;
+
+    fn make_book(side: Side) -> (BookSide, crossbeam_channel::Receiver<QuoteUpdate>) {
+        let (tx, rx) = unbounded();
+        (BookSide::new(side, tx), rx)
+    }
+
+    fn drain(rx: &crossbeam_channel::Receiver<QuoteUpdate>) -> Vec<QuoteUpdate> {
+        let mut v = vec![];
+        while let Ok(q) = rx.try_recv() {
+            v.push(q);
+        }
+        v
+    }
+
+    #[test]
+    fn new_id_adds_level() {
+        let (mut book, rx) = make_book(Side::Bid);
+        book.update(1, 100.0, 2.0, TS, SYM);
+
+        let updates = drain(&rx);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].price, 100.0);
+        assert_eq!(updates[0].size, 2.0);
+        assert_eq!(updates[0].id, 1);
+    }
+
+    #[test]
+    fn same_id_same_price_updates_size() {
+        let (mut book, rx) = make_book(Side::Bid);
+        book.update(1, 100.0, 2.0, TS, SYM);
+        book.update(1, 100.0, 5.0, TS, SYM);
+
+        let updates = drain(&rx);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[1].price, 100.0);
+        assert_eq!(updates[1].size, 5.0);
+        assert_eq!(updates[1].id, 1);
+    }
+
+    #[test]
+    fn same_id_new_price_moves_level() {
+        let (mut book, rx) = make_book(Side::Bid);
+        book.update(1, 100.0, 2.0, TS, SYM);
+        book.update(1, 200.0, 3.0, TS, SYM);
+
+        // only 2 updates — old level removed silently from BTreeMap, new price emitted
+        let updates = drain(&rx);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[1].price, 200.0);
+        assert_eq!(updates[1].size, 3.0);
+    }
+
+    #[test]
+    fn bid_prunes_lowest_price() {
+        let (mut book, rx) = make_book(Side::Bid);
+        for i in 1u64..=101 {
+            book.update(i, i as f64, 1.0, TS, SYM);
+        }
+
+        let updates = drain(&rx);
+        let prune = updates.last().unwrap();
+        assert_eq!(prune.price, 1.0);
+        assert_eq!(prune.size, 0.0);
+    }
+
+    #[test]
+    fn ask_prunes_highest_price() {
+        let (mut book, rx) = make_book(Side::Ask);
+        for i in 1u64..=101 {
+            book.update(i, i as f64, 1.0, TS, SYM);
+        }
+
+        let updates = drain(&rx);
+        let prune = updates.last().unwrap();
+        assert_eq!(prune.price, 101.0);
+        assert_eq!(prune.size, 0.0);
+    }
+
+    #[test]
+    fn never_exceeds_max_levels() {
+        let (mut book, rx) = make_book(Side::Bid);
+        for i in 1u64..=200 {
+            book.update(i, i as f64, 1.0, TS, SYM);
+        }
+
+        // Count net live levels: +1 for size>0 (insert), -1 for size=0 (prune).
+        // Check final count, matching C++ test semantics — the prune fires within
+        // the same update call, so the net after each update stays <= BOOK_LEVELS.
+        let updates = drain(&rx);
+        let mut live: i64 = 0;
+        for q in &updates {
+            if q.size > 0.0 { live += 1; } else { live -= 1; }
+        }
+        assert!(live <= BOOK_LEVELS as i64);
+    }
+
+    #[test]
+    fn prune_emits_correct_id() {
+        let (mut book, rx) = make_book(Side::Bid);
+        // id=200 at price=1.0 — worst bid (lowest price), will be pruned first
+        book.update(200, 1.0, 1.0, TS, SYM);
+        for i in 1u64..=100 {
+            book.update(i, (i + 1) as f64, 1.0, TS, SYM);
+        }
+
+        let updates = drain(&rx);
+        let prune = updates.last().unwrap();
+        assert_eq!(prune.id, 200);
+        assert_eq!(prune.size, 0.0);
+    }
+}
