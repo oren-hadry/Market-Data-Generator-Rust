@@ -25,6 +25,8 @@ pub enum RateProfile {
     Ramp,
 }
 
+// size is not used in this scenario - but is required
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct BookLevel {
     pub size: f64,

@@ -26,8 +26,5 @@ impl OrderBook {
         }
     }
 
-    pub fn snapshot(&self, ts: u64) {
-        self.bids.snapshot(&self.sym, ts);
-        self.asks.snapshot(&self.sym, ts);
-    }
+
 }

@@ -53,19 +53,6 @@ impl BookSide {
         }
     }
 
-    pub fn snapshot(&self, symbol: &str, ts: u64) {
-        for (price, level) in &self.levels {
-            let _ = self.tx.send(QuoteUpdate {
-                ts,
-                symbol: symbol.to_string(),
-                side: self.side,
-                price: price.0,
-                size: level.size,
-                id: level.id,
-            });
-        }
-    }
-
     fn prune(&mut self, symbol: &str) {
         // Bids: prune lowest (begin). Asks: prune highest (end).
         let key = match self.side {
