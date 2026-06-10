@@ -2,8 +2,6 @@
 
 Generates a synthetic order-book feed for configurable symbols, rate-limits output, and streams CSV to stdout. Designed for low-to-mid throughput market data (10–10,000 qps) — **not an HFT engine**.
 
-Port of the [C++ implementation](https://github.com/oren-hadry/Market-Data-Generator) to Rust.
-
 ---
 
 ## Quick Start
