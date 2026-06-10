@@ -4,7 +4,7 @@ use crossbeam_channel::Sender;  // The project needs a bounded channel with mult
 use ordered_float::OrderedFloat;
 
 use crate::time::now_micros;
-use crate::types::{BookLevel, QuoteUpdate, Side, BOOK_LEVELS};
+use crate::types::{BookLevel, QuoteUpdate, Side, Symbol, BOOK_LEVELS};
 
 // Rust equivalent of BookSide::PushFn: Sender<QuoteUpdate> replaces std::function<void(QuoteUpdate)>.
 // Sender is Clone + Send, so each BookSide (bid/ask) gets its own clone — no shared_ptr needed.
@@ -28,7 +28,7 @@ impl BookSide {
         }
     }
 
-    pub fn update(&mut self, id: u64, price: f64, size: f64, ts: u64, symbol: &str) {
+    pub fn update(&mut self, id: u64, price: f64, size: f64, ts: u64, symbol: Symbol) {
         if let Some(&old_price) = self.id_to_price.get(&id) {
             self.levels.remove(&OrderedFloat(old_price));
             self.id_to_price.insert(id, price);
@@ -41,7 +41,7 @@ impl BookSide {
         // _ = ignore the Result — channel full means consumer is behind; backpressure handled by sender spin in engine
         let _ = self.tx.send(QuoteUpdate {
             ts,
-            symbol: symbol.to_string(),
+            symbol,
             side: self.side,
             price,
             size,
@@ -53,7 +53,7 @@ impl BookSide {
         }
     }
 
-    fn prune(&mut self, symbol: &str) {
+    fn prune(&mut self, symbol: Symbol) {
         // Bids: prune lowest (begin). Asks: prune highest (end).
         let key = match self.side {
             Side::Bid => *self.levels.keys().next().unwrap(),
@@ -63,7 +63,7 @@ impl BookSide {
         self.id_to_price.remove(&level.id);
         let _ = self.tx.send(QuoteUpdate {
             ts: now_micros(),
-            symbol: symbol.to_string(),
+            symbol,
             side: self.side,
             price: key.0,
             size: 0.0,
@@ -77,7 +77,7 @@ mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
 
-    const SYM: &str = "BTCUSD";
+    const SYM: Symbol = Symbol::BtcUsd;
     const TS: u64 = 1000;
 
     fn make_book(side: Side) -> (BookSide, crossbeam_channel::Receiver<QuoteUpdate>) {

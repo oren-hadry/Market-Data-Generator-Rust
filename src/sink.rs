@@ -13,7 +13,7 @@ impl Sink for StdoutSink {
         println!(
             "{},{},{},{:.5},{:.4},{}",
             q.ts,
-            q.symbol,
+            q.symbol.as_str(),
             q.side.as_str(),
             q.price,
             q.size,

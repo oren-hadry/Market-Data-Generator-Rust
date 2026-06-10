@@ -6,7 +6,7 @@ use rand::Rng;
 use rand_distr::{Distribution, Normal};
 
 use crate::time::now_micros;
-use crate::types::{Config, MarketEvent, Side, BOOK_LEVELS};
+use crate::types::{Config, MarketEvent, Side, Symbol, BOOK_LEVELS};
 
 // Rust trait = C++ abstract base class (pure virtual).
 // `Send` supertrait means: "this type is safe to move to another thread" — required since
@@ -16,17 +16,17 @@ pub trait InputGenerator: Send {
 }
 
 pub struct SyntheticGenerator {
-    symbols: Vec<String>,
-    mid_prices: HashMap<String, f64>,
-    id_counters: HashMap<String, [u64; 2]>,
+    symbols: Vec<Symbol>,
+    mid_prices: HashMap<Symbol, f64>,
+    id_counters: HashMap<Symbol, [u64; 2]>,
     rng: StdRng,
 }
 
 impl SyntheticGenerator {
     pub fn new(config: &Config) -> Self {
         let mut id_counters = HashMap::new();
-        for sym in &config.symbols {
-            id_counters.insert(sym.clone(), [0u64; 2]);
+        for &sym in &config.symbols {
+            id_counters.insert(sym, [0u64; 2]);
         }
         Self {
             symbols: config.symbols.clone(),
@@ -40,7 +40,7 @@ impl SyntheticGenerator {
 impl InputGenerator for SyntheticGenerator {
     fn generate_next(&mut self) -> MarketEvent {
         let sym_idx = self.rng.gen_range(0..self.symbols.len());
-        let symbol = self.symbols[sym_idx].clone();
+        let symbol = self.symbols[sym_idx];
 
         let mid = self.mid_prices[&symbol];
         // Normal distribution for price walk — rand_distr::Normal replaces std::normal_distribution

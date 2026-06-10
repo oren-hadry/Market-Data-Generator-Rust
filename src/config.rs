@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 
-use crate::types::{Config, RateProfile};
+use crate::types::{Config, RateProfile, Symbol};
 
 pub fn parse_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)
@@ -22,23 +22,23 @@ pub fn parse_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
         rp         => return Err(format!("unknown rate_profile: {rp}").into()),
     };
 
-    let symbols: Vec<String> = root["symbols"]
+    let symbols: Vec<Symbol> = root["symbols"]
         .as_array()
         .ok_or("config missing symbols array")?
         .iter()
-        .map(|v| v.as_str().unwrap_or("").to_string())
-        .collect();
+        .map(|v| Symbol::from_str(v.as_str().unwrap_or("")).map_err(|e| e.into()))
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
 
     if symbols.is_empty() {
         return Err("config missing symbols".into());
     }
 
     let mut initial_mid_prices = HashMap::new();
-    for sym in &symbols {
-        let price = root["initial_mid_prices"][sym]
+    for &sym in &symbols {
+        let price = root["initial_mid_prices"][sym.as_str()]
             .as_f64()
-            .ok_or_else(|| format!("config missing initial_mid_prices.{sym}"))?;
-        initial_mid_prices.insert(sym.clone(), price);
+            .ok_or_else(|| format!("config missing initial_mid_prices.{}", sym.as_str()))?;
+        initial_mid_prices.insert(sym, price);
     }
 
     Ok(Config { rate_profile, base_rate, max_rate, data_mode, symbols, initial_mid_prices })
