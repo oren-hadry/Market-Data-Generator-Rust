@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::Sender;  // The project needs a bounded channel with multiple senders. std::sync::mpsc can't do both cleanly
 use ordered_float::OrderedFloat;
 
 use crate::time::now_micros;

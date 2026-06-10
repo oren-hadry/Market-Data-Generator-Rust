@@ -122,16 +122,47 @@ Consumer thread
 
 ## Stress Testing: Gradually Escalating Quote Rate
 
-Use `rate_profile=ramp`. The `RateController` linearly interpolates from `base_rate` → `max_rate` over 60 seconds:
+> *"How would you devise a synthetic Market Maker that gradually escalates its quoting rate over time for stress testing purposes?"*
+
+Use `rate_profile=ramp`. The `RateController` linearly interpolates from `base_rate` → `max_rate` over 60 seconds, then holds at `max_rate`:
 
 ```
 rate(t) = base_rate + min(t / 60, 1.0) × (max_rate - base_rate)
 ```
 
+**Example** (`base_rate=100`, `max_rate=10000`):
+
+| time | rate |
+|------|------|
+| 0s | 100 qps |
+| 15s | 2575 qps |
+| 30s | 5050 qps |
+| 60s | 10,000 qps |
+
+This lets a downstream system (trading engine, data store, network stack) be observed as load increases continuously — failures surface at the exact rate threshold where the system breaks, not just "it worked at 1k but failed at 10k".
+
 Config:
 ```json
 { "rate_profile": "ramp", "base_rate": 100, "max_rate": 10000 }
 ```
+
+The `burst` profile (random spikes to `max_rate` at 5% probability) is complementary — tests recovery from sudden load, not sustained escalation.
+
+---
+
+## Design Trade-offs & FAQ
+
+**Q: Won't the spin-wait burn 100% CPU when the channel is full?**
+Yes, by design — minimizing latency over power. `crossbeam_channel` spins on `try_recv` when the channel is empty. Mitigation: fall back to `yield` or a short sleep after N failed spins if CPU budget is constrained.
+
+**Q: `f64` as a map key — NaN/precision issues?**
+The C++ version used `double` as a `std::map` key — a known anti-pattern. Rust refuses to compile bare `f64` as a `BTreeMap` key because `f64` has no total ordering (`NaN != NaN`). The fix is `OrderedFloat<f64>`, which adds a defined ordering for `NaN` as an edge case. Phase 2 will move to `i64` fixed-point ticks (multiply by 10⁵–10⁸), shifting comparisons from FP to integer ALU.
+
+**Q: Per-symbol producer threads (Phase 2) would break the single channel — how?**
+Each symbol thread gets its own `crossbeam::bounded` channel. The consumer multiplexes across them via round-robin `try_recv`. Never MPSC — each channel has exactly one sender, so there is no lock contention. See [PHASE2_ARCHITECTURE.md](PHASE2_ARCHITECTURE.md).
+
+**Q: Why pace the sink instead of throttling the generator?**
+Throttling the generator couples book logic to transport schedule. Full channel = natural backpressure. Sink-side pacing lets rate profiles swap at runtime without touching order book code.
 
 ---
 
