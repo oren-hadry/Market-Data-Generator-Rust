@@ -18,7 +18,8 @@ impl BooksManager {
     pub fn populate_and_init_books(&mut self, config: &Config, tx: Sender<QuoteUpdate>) {
         let ts = now_micros();
         for &sym in &config.symbols {
-            // tx.clone() — each OrderBook gets its own Sender clone (same channel, multiple producers ok)
+            // tx.clone() — each OrderBook gets Sender handler (pointer) (same channel, multiple producers ok)
+            // Phase 2: replace with one channel per symbol — consumer multiplexes via round-robin try_recv
             let book = OrderBook::new(sym, tx.clone());
             self.books.insert(sym, book);
 

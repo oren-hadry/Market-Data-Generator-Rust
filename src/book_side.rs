@@ -31,14 +31,12 @@ impl BookSide {
     pub fn update(&mut self, id: u64, price: f64, size: f64, ts: u64, symbol: Symbol) {
         if let Some(&old_price) = self.id_to_price.get(&id) {
             self.levels.remove(&OrderedFloat(old_price));
-            self.id_to_price.insert(id, price);
-        } else {
-            self.id_to_price.insert(id, price);
-        }
+        } 
 
+        self.id_to_price.insert(id, price); // insert or update
         self.levels.insert(OrderedFloat(price), BookLevel { size, id });
 
-        // _ = ignore the Result — channel full means consumer is behind; backpressure handled by sender spin in engine
+        // _ = ignore the Result — send() blocks when the bounded channel is full; that's the backpressure signal
         let _ = self.tx.send(QuoteUpdate {
             ts,
             symbol,
