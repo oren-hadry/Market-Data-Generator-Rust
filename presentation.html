@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Enki — Synthetic Market Data Simulator</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/theme/black.min.css">
+<style>
+  :root {
+    --rust: #F74C00;
+    --rust-dim: #a33300;
+    --code-bg: #1a1a2e;
+    --accent: #e0a500;
+  }
+  .reveal {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+  .reveal h1, .reveal h2, .reveal h3 {
+    color: var(--rust);
+    text-transform: none;
+    letter-spacing: -0.02em;
+  }
+  .reveal pre {
+    font-size: 0.55em;
+    background: var(--code-bg);
+    border-left: 4px solid var(--rust);
+    box-shadow: none;
+    width: 100%;
+  }
+  .reveal code {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    color: #e8e8e8;
+  }
+  .reveal .highlight { color: var(--accent); font-weight: bold; }
+  .reveal .rust-color { color: var(--rust); font-weight: bold; }
+  .box {
+    background: rgba(247,76,0,0.12);
+    border: 1px solid var(--rust);
+    border-radius: 6px;
+    padding: 12px 20px;
+    margin: 8px 0;
+  }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    font-size: 0.75em;
+  }
+  .grid-3 {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+    font-size: 0.7em;
+  }
+  table { font-size: 0.7em; width: 100%; }
+  th { background: var(--rust-dim); color: #fff; padding: 6px 10px; }
+  td { padding: 5px 10px; border-bottom: 1px solid #333; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.04); }
+  .tag {
+    display: inline-block;
+    background: var(--rust);
+    color: #fff;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.7em;
+    margin: 3px;
+  }
+  .arrow { color: var(--rust); font-size: 1.3em; }
+  .dim { color: #888; }
+  .slide-title-slide h1 { font-size: 2.2em; }
+  .badge {
+    background: #222;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 0.65em;
+    font-family: monospace;
+    color: #ccc;
+  }
+  .phase-badge {
+    display: inline-block;
+    background: var(--rust);
+    color: white;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 0.65em;
+    vertical-align: middle;
+    margin-left: 6px;
+  }
+  .green { color: #4ec94e; }
+  .yellow { color: var(--accent); }
+  .red { color: #e05555; }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ─── TITLE ─── -->
+<section class="slide-title-slide" data-background-gradient="radial-gradient(ellipse at 60% 40%, #1a0800 0%, #0d0d0d 70%)">
+  <h1>Enki</h1>
+  <h3 style="color:#ccc; margin-top:-10px">Synthetic Market Data Simulator</h3>
+  <hr style="border-color:var(--rust); width:200px; margin:20px auto">
+  <p style="color:#aaa; font-size:0.8em">
+    Written in <span class="rust-color">Rust</span> &nbsp;·&nbsp;
+    Ported from C++ &nbsp;·&nbsp;
+    Phase 1 complete &nbsp;·&nbsp; Phase 2 in design
+  </p>
+  <div style="margin-top:30px">
+    <span class="badge">crossbeam-channel</span>
+    <span class="badge">ordered-float</span>
+    <span class="badge">serde_json</span>
+    <span class="badge">rand_distr</span>
+  </div>
+</section>
+
+<!-- ─── WHAT IS IT ─── -->
+<section>
+  <h2>Project Overview</h2>
+  <div class="box" style="font-size:0.85em">
+    Generates a continuous <strong>data feed</strong> for configurable symbols, rate-limits output, and streams messages to stdout.
+  </div>
+  <div class="grid-3" style="margin-top:24px">
+    <div class="box" style="text-align:center">
+      <div style="font-size:2em">📈</div>
+      <strong>Market simulation</strong><br>
+      <span class="dim">Recorded or synthethic random-walk, multiple streams</span>
+    </div>
+    <div class="box" style="text-align:center">
+      <div style="font-size:2em">⚡</div>
+      <strong>Rate control</strong><br>
+      <span class="dim">Multiple load profiles: sine / burst / ramp / constant</span>
+    </div>
+    <div class="box" style="text-align:center">
+      <div style="font-size:2em">📡</div>
+      <strong>Data streams</strong><br>
+      <span class="dim">Orderbook L2, Trades, BBO</span>
+    </div>
+  </div>
+  <p style="font-size:0.7em; color:#888; margin-top:18px">
+    Target range: <strong>10–10,000 qps</strong> &nbsp;·&nbsp; <strong>Mid-Frequency market data.</strong>
+  </p>
+</section>
+
+<!-- ─── OUTPUT FORMAT ─── -->
+<section>
+  <h2>Output Format</h2>
+  <pre><code class="bash">$ ./run.sh config/config_burst.json | head -5
+
+ts,sym,side,price,size,id
+1717430400000000,BTCUSD,bid,64967.50000,2.3142,7
+1717430400000100,BTCUSD,ask,65012.25000,1.8800,12
+1717430400000250,ETHUSD,bid,3398.75000,5.1000,3
+1717430400000380,ETHUSD,ask,3401.00000,2.9900,8</code></pre>
+
+
+  <div style="margin-top:16px; font-size:0.78em; display:grid; grid-template-columns:1fr 1fr; gap:8px 40px; text-align:left">
+    <div><code>ts</code> &nbsp;<span class="dim">— microsecond timestamp</span></div>
+    <div><code>price</code> &nbsp;<span class="dim">— OrderedFloat&lt;f64&gt;</span></div>
+    <div><code>symbol</code> &nbsp;<span class="dim">— enum</span></div>
+    <div><code>size</code> &nbsp;<span class="dim">— quantity at level</span></div>
+    <div><code>side</code> &nbsp;<span class="dim">— bid or ask</span></div>
+    <div><code>id</code> &nbsp;<span class="dim">— 0–99, cycling per sym/side</span></div>
+  </div>
+</section>
+
+<!-- ─── ARCHITECTURE OVERVIEW ─── -->
+<section>
+  <h2>Architecture — Phase 1</h2>
+  <pre class="r-stretch"><code class="nohighlight" data-noescape style="font-size:0.6em; line-height:1.6"><span style="color:#c792ea">(Data)Generator</span>  <span style="color:#e8e8e8">[ Thread 1: Producer ]</span>
+    │  <span style="color:#c792ea">MarketEvent { symbol, side, price, size, id }</span>
+    ▼
+<span style="color:#c792ea">BooksManager</span>  ──  <span style="color:#c792ea">HashMap&lt;String, OrderBook&gt;</span>  <span style="color:#e8e8e8">(O(1) symbol lookup)</span>
+    │
+    ▼
+<span style="color:#c792ea">OrderBook</span> <span style="color:#e8e8e8">(per symbol)</span>
+    ├── <span style="color:#c792ea">BookSide [bid]  BTreeMap&lt;OrderedFloat&lt;f64&gt;, BookLevel&gt;</span>  <span style="color:#e8e8e8">── O(log N), max 100 levels</span>
+    └── <span style="color:#c792ea">BookSide [ask]  BTreeMap&lt;OrderedFloat&lt;f64&gt;, BookLevel&gt;</span>  <span style="color:#e8e8e8">── sorted for fast pruning</span>
+    │
+    │  <span style="color:#c792ea">Sender&lt;QuoteUpdate&gt;.send()</span>
+    ▼
+<span style="color:#c792ea">crossbeam_channel::bounded&lt;QuoteUpdate, 256&gt;</span>  <span style="color:#e8e8e8">← shared memory buffer, backpressure when full</span>
+    │
+    ▼
+<span style="color:#e8e8e8">[ Thread 2: Consumer ]</span>
+    ├── <span style="color:#c792ea">RateController</span>  <span style="color:#e8e8e8">── sleep(duration) per profile</span>
+    └── <span style="color:#c792ea">Vec&lt;Box&lt;dyn Sink&gt;&gt;</span>
+         └── <span style="color:#c792ea">StdoutSink</span>  <span style="color:#e8e8e8">── CSV</span></code></pre>
+  <p style="font-size:0.65em; color:#888; margin-top:10px">
+    2 threads &nbsp;·&nbsp; 1 bounded channel &nbsp;·&nbsp; natural backpressure
+  </p>
+</section>
+
+<!-- ─── KEY FILES ─── -->
+<section>
+  <h2>Codebase Map</h2>
+  <table style="font-size:0.63em">
+    <tr><th>File</th><th>Responsibility</th></tr>
+    <tr><td><code>types.rs</code></td><td>Config, MarketEvent, QuoteUpdate, BookLevel, Side, RateProfile</td></tr>
+    <tr><td><code>config.rs</code></td><td>serde_json config loader</td></tr>
+    <tr><td><code>generator.rs</code></td><td>InputGenerator trait; SyntheticGenerator — random-walk + cycling ids</td></tr>
+    <tr><td><code>book_side.rs</code></td><td>Price-keyed half book; O(1) id→price reverse map (id_to_price: HashMap)</td></tr>
+    <tr><td><code>order_book.rs</code></td><td>Owns [bid + ask] BookSides; routes events</td></tr>
+    <tr><td><code>books_manager.rs</code></td><td>HashMap&lt;sym, OrderBook&gt;; routes MarketEvent</td></tr>
+    <tr><td><code>rate_controller.rs</code></td><td>Sleep duration for sine / constant / burst / ramp</td></tr>
+    <tr><td><code>sink.rs</code></td><td>Sink trait; StdoutSink CSV impl</td></tr>
+    <tr><td><code>engine.rs</code></td><td>Wires threads + Arc&lt;AtomicBool&gt; running flag</td></tr>
+  </table>
+</section>
+
+<!-- ─── DESIGN DECISIONS ─── -->
+<section>
+  <section>
+    <h2>Key Design Decisions</h2>
+    <p style="color:#aaa; font-size:0.8em">click ↓ to go through each one</p>
+    <div class="grid-2" style="margin-top:20px">
+      <div class="box">🔢 <strong>OrderedFloat&lt;f64&gt;</strong> as BTreeMap key</div>
+      <div class="box">📦 <strong>crossbeam bounded(256)</strong> replaces hand-rolled SPSC</div>
+      <div class="box">🔗 <strong>Sender&lt;T&gt;</strong> instead of std::function callback</div>
+      <div class="box">🚦 <strong>Arc&lt;AtomicBool&gt;</strong> for signal-safe shutdown</div>
+    </div>
+  </section>
+
+  <section>
+    <h3>OrderedFloat&lt;f64&gt;</h3>
+    <div class="grid-2">
+      <div class="box red">
+        <strong>C++</strong><br>
+        <code>std::map&lt;double, BookLevel&gt;</code><br>
+        <span class="dim">compiles — undefined behavior on NaN</span>
+      </div>
+      <div class="box green">
+        <strong>Rust</strong><br>
+        <code>BTreeMap&lt;OrderedFloat&lt;f64&gt;, BookLevel&gt;</code><br>
+        <span class="dim">f64 has no Ord (NaN) — compiler refuses bare f64</span>
+      </div>
+    </div>
+    <div class="box" style="margin-top:16px; font-size:0.8em">
+      <strong>Phase 2 plan:</strong> move to <code>i64</code> fixed-point ticks — integer ALU, no FP comparison at all.
+    </div>
+  </section>
+
+  <section>
+    <h3>crossbeam bounded(256)</h3>
+    <div class="grid-2">
+      <div class="box red">
+        <strong>C++</strong><br>
+        Hand-rolled <code>BoundedSPSCQueue</code><br>
+        <span class="dim">custom atomic ops, potential UB (on wrong memory ordering)</span>
+      </div>
+      <div class="box green">
+        <strong>Rust</strong><br>
+        <code>crossbeam_channel::bounded(256)</code><br>
+        <span class="dim">same semantics, battle-tested, zero unsafe, Producer blocks on send() when full → backpressure, no overflow
+          Consumer blocks on recv() when empty</span>
+      </div>
+    </div>
+    <p style="font-size:0.75em; margin-top:16px; text-align:left">
+      When channel is full → <code>send()</code> blocks the producer → natural backpressure, no extra logic needed.
+    </p>
+    <p style="font-size:0.7em; color:#aaa; margin-top:10px; text-align:left">
+      <code>std::sync::mpsc</code> — can't wait on multiple channels (needed in Phase 2)<br>
+      <code>tokio::sync::mpsc</code> — requires async runtime; our code is purely sync (<code>std::thread</code>)
+    </p>
+  </section>
+
+  <section>
+    <h3>Sender&lt;T&gt; as push callback</h3>
+    <p style="font-size:0.75em; color:#aaa; margin-bottom:10px; text-align:left">
+      One channel, multiple writers — bid and ask sides send independently. <code>Sender</code> is <code>Clone + Send</code>, so each gets its own handle to the same queue.
+    </p>
+    <pre><code class="rust">// engine.rs passes a clone to BooksManager
+let manager_tx = tx.clone();
+
+// Each BookSide holds its own clone
+let bid_tx = tx.clone();
+let ask_tx = tx.clone();
+
+// When ALL senders drop → channel closes → consumer exits
+</code></pre>
+    <div class="box" style="font-size:0.6em">
+      <strong>Shutdown sequence:</strong> producer loop exits → all senders (original + per-BookSide clones) drop (out of scope) → channel closes → consumer drains remaining, exits cleanly.
+    </div>
+  </section>
+
+  <section>
+    <h3>Arc&lt;AtomicBool&gt; for Ctrl+C</h3>
+    <pre style="margin-top:14px"><code class="rust">let running = Arc::new(AtomicBool::new(true));
+let r = running.clone();
+ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); })?;
+// producer thread: while running.load(Ordering::SeqCst) { ... }
+</code></pre>
+    <div class="box" style="font-size:0.6em; margin-top:12px">
+      <code>Arc</code> — shared ownership across threads, no dangling references<br>
+      <code>AtomicBool</code> — race-free store/load, no lock needed
+    </div>
+  </section>
+</section>
+
+<!-- ─── RATE PROFILES ─── -->
+<section>
+  <h2>Selected Rate Profiles</h2>
+  <table>
+    <tr><th>Profile</th><th>Behaviour</th><th>Use case</th></tr>
+    <tr><td><code>constant</code></td><td>Fixed rate at base_rate</td><td>Baseline / unit tests</td></tr>
+    <tr><td><code>sine</code></td><td>Oscillates base_rate ↔ max_rate</td><td>Simulate market hours</td></tr>
+    <tr><td><code>burst</code></td><td>5% chance spike to max_rate</td><td>Recovery from sudden load</td></tr>
+    <tr><td><code>ramp</code></td><td>Linear base → max over 60s, then holds</td><td>Find the breaking point</td></tr>
+  </table>
+  <div class="box" style="margin-top:18px; font-size:0.6em">
+    <strong>Ramp formula:</strong><br>
+    <code>rate(t) = base_rate + min(t/60, 1.0) × (max_rate − base_rate)</code><br><br>
+    Surfaces failures at the exact rate threshold — not just "works at 1k, fails at 10k".
+  </div>
+</section>
+
+<!-- ─── CONFIGURATION ─── -->
+<section>
+  <h2>Configuration (JSON)</h2>
+  <div class="grid-2">
+    <pre><code class="json">// config_burst.json
+{
+  "data_mode": "synthetic",
+  "symbols": ["BTCUSD","ETHUSD","ETHBTC"],
+  "rate_profile": "burst",
+  "base_rate": 500.0,
+  "max_rate": 10000.0,
+  "initial_mid_prices": {
+    "BTCUSD": 65000.0,
+    "ETHUSD":  3400.0,
+    "ETHBTC":     0.052
+  }
+}</code></pre>
+    <pre><code class="json">// config_ramp.json
+{
+  "data_mode": "synthetic",
+  "symbols": ["BTCUSD","ETHUSD","ETHBTC"],
+  "rate_profile": "ramp",
+  "base_rate": 100.0,
+  "max_rate": 10000.0,
+  "initial_mid_prices": {
+    "BTCUSD": 65000.0,
+    "ETHUSD":  3400.0,
+    "ETHBTC":     0.052
+  }
+}</code></pre>
+  </div>
+  <p style="font-size:0.7em; color:#888; margin-top:10px">
+    <code>./run.sh config/config_ramp.json</code> &nbsp;·&nbsp; Ctrl+C for graceful shutdown
+  </p>
+</section>
+
+<!-- ─── KNOWN GAPS (candid) ─── -->
+<section>
+  <h2>Known Gaps — Phase 1</h2>
+  <div style="font-size:0.75em; margin-bottom:14px">
+    <div class="box" style="border-color:#e0a500">
+      <span class="yellow">⚠</span> <strong>No rate bounds validation</strong><br>
+      Brief says <code>base_rate ≥ 10</code>, <code>max_rate ≤ 10,000</code>.<br>
+      <span class="dim">config.rs reads the values without enforcing these limits — you could pass base_rate=1. Easy fix: add a bounds check after parsing.</span>
+    </div>
+  </div>
+  <div class="box" style="font-size:0.75em">
+    <span class="green">✓</span> No unsafe code &nbsp;·&nbsp;
+    <span class="green">✓</span> Graceful Ctrl+C shutdown &nbsp;·&nbsp;
+    <span class="green">✓</span> Zero memory leaks (Rust ownership)<br>
+    <span class="green">✓</span> Symbol is an enum — <code>from_str()</code> rejects unknown symbols at load time
+  </div>
+</section>
+
+<!-- ─── PHASE 2 ROADMAP ─── -->
+<section>
+  <section>
+    <h2>Phase 2 — What's Next</h2>
+    <p style="color:#aaa; font-size:0.75em">click ↓ for details</p>
+    <div class="grid-2" style="font-size:0.7em; margin-top:16px">
+      <div class="box">🧵 Per-symbol producer threads<br><span class="dim">1 thread + 1 channel per symbol</span></div>
+      <div class="box">📌 CPU pinning<br><span class="dim">core_affinity crate, no scheduler jitter</span></div>
+      <div class="box">🔌 Multiple output sinks<br><span class="dim">ZMQ PUB · WebSocket · FlatBuffers</span></div>
+      <div class="box">📼 Recorded replay<br><span class="dim">real historical L2 data, time-scaled</span></div>
+      <div class="box">📊 Observability<br><span class="dim">Prometheus metrics, P99 latency, channel depth (queue backpressure)</span></div>
+      <div class="box">🔧 Config hot-reload<br><span class="dim">SIGHUP → update RateController lock-free</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h3>Phase 2 Thread Model</h3>
+    <pre><code style="font-size:0.58em; line-height:1.7">// Phase 1
+[Producer Thread]  →  crossbeam::bounded&lt;256&gt;  →  [Consumer Thread]
+  all symbols                                         all sinks
+
+// Phase 2
+[Producer BTCUSD]  → RateCtrl[BTC] →  bounded&lt;BTCUSD&gt;  ─┐
+[Producer ETHUSD]  → RateCtrl[ETH] →  bounded&lt;ETHUSD&gt;  ─┤→ [Consumer] → GlobalCap → Sinks
+[Producer ETHBTC]  → RateCtrl[EBT] →  bounded&lt;ETHBTC&gt;  ─┘  (round-robin try_recv)</code></pre>
+    <p style="font-size:0.7em; margin-top:16px">
+      No MPSC lock contention — each channel has exactly <strong>one sender</strong>.
+      Round-robin consumer is fair: a hot BTCUSD won't starve ETHBTC.
+    </p>
+  </section>
+
+  <section>
+    <h3>Phase 2 Performance Targets</h3>
+    <table>
+      <tr><th>Metric</th><th>Phase 1</th><th>Phase 2 target</th></tr>
+      <tr>
+        <td>Max throughput</td>
+        <td>10,000 qps</td>
+        <td class="green">500,000+ qps</td>
+      </tr>
+      <tr>
+        <td>Symbols</td>
+        <td>3–10</td>
+        <td class="green">50–500</td>
+      </tr>
+      <tr>
+        <td>P99 latency (enqueue→emit)</td>
+        <td>~1ms</td>
+        <td class="green">&lt;50µs (pinned)</td>
+      </tr>
+      <tr>
+        <td>Output sinks</td>
+        <td>1 (stdout)</td>
+        <td class="green">N (ZMQ, WS, FlatBuffers)</td>
+      </tr>
+      <tr>
+        <td>CPU at max rate</td>
+        <td class="yellow">100% (spin-wait)</td>
+        <td class="green">Bounded (pinned core)</td>
+      </tr>
+    </table>
+    <p style="font-size:0.65em; color:#888; margin-top:12px">Still not HFT. HFT = &lt;1µs with DPDK/RDMA. Phase 2 targets mid-frequency data distribution. Rate-limit moved into per-symbol producers</p>
+  </section>
+
+  <section>
+    <h3>New Crates for Phase 2</h3>
+    <table>
+      <tr><th>Crate</th><th>Purpose</th></tr>
+      <tr><td><code>core_affinity</code></td><td>CPU pinning (pthread_setaffinity_np)</td></tr>
+      <tr><td><code>zmq</code></td><td>ZMQ PUB socket sink</td></tr>
+      <tr><td><code>tokio</code> + <code>tokio-tungstenite</code></td><td>Async WebSocket sink</td></tr>
+      <tr><td><code>flatbuffers</code></td><td>Zero-copy binary wire format</td></tr>
+      <tr><td><code>csv</code></td><td>RecordedGenerator tick file parsing</td></tr>
+      <tr><td><code>prometheus</code></td><td>Metrics exposition</td></tr>
+    </table>
+  </section>
+</section>
+
+<!-- ─── ARCHITECTURE PHASE 2 ─── -->
+<section>
+  <h2>Architecture — Phase 2</h2>
+  <pre class="r-stretch"><code class="nohighlight" data-noescape style="font-size:0.6em; line-height:1.6"><span style="color:#e8e8e8">[ Thread 1: Producer BTCUSD ]</span>  <span style="color:#c792ea">RateController[BTC]</span>  →  <span style="color:#c792ea">bounded&lt;BTCUSD&gt;</span>  ─┐
+<span style="color:#e8e8e8">[ Thread 2: Producer ETHUSD ]</span>  <span style="color:#c792ea">RateController[ETH]</span>  →  <span style="color:#c792ea">bounded&lt;ETHUSD&gt;</span>  ─┤
+<span style="color:#e8e8e8">[ Thread 3: Producer ETHBTC ]</span>  <span style="color:#c792ea">RateController[EBT]</span>  →  <span style="color:#c792ea">bounded&lt;ETHBTC&gt;</span>  ─┘
+    │
+    ▼  <span style="color:#e8e8e8">round-robin try_recv()</span>
+<span style="color:#e8e8e8">[ Thread N: Consumer ]</span>
+    │
+    ├── <span style="color:#c792ea">GlobalRateCap</span>  <span style="color:#e8e8e8">── hard ceiling for downstream</span>
+    └── <span style="color:#c792ea">Vec&lt;Box&lt;dyn Sink&gt;&gt;</span>
+         ├── <span style="color:#c792ea">StdoutSink</span>       <span style="color:#e8e8e8">── CSV</span>
+         ├── <span style="color:#c792ea">ZmqSink</span>          <span style="color:#e8e8e8">── PUB socket</span>
+         ├── <span style="color:#c792ea">WebSocketSink</span>    <span style="color:#e8e8e8">── JSON stream</span>
+         └── <span style="color:#c792ea">FlatBuffersSink</span>  <span style="color:#e8e8e8">── zero-copy binary</span></code></pre>
+  <p style="font-size:0.65em; color:#888; margin-top:10px">
+    1 thread per symbol &nbsp;·&nbsp; 1 channel per symbol &nbsp;·&nbsp; no MPSC lock contention &nbsp;·&nbsp; target 500k+ qps
+  </p>
+</section>
+
+<!-- ─── FAQ ─── -->
+<section>
+  <h2>FAQ</h2>
+  <div style="font-size:0.5em; line-height:1.9">
+    <div class="box">
+      <strong>Q: Won't spin-wait burn 100% CPU when the channel is full?</strong><br>
+      Yes, by design — minimising latency over power. Mitigation in Phase 2: fall back to <code>yield</code> after N failed spins if CPU budget is constrained.
+    </div>
+    <div class="box">
+      <strong>Q: f64 as map key — precision issues?</strong><br>
+      C++ silently accepted NaN comparisons. Rust refuses to compile bare f64 as BTreeMap key. <code>OrderedFloat</code> adds defined ordering. Phase 2 moves to i64 fixed-point.
+    </div>
+    <div class="box">
+      <strong>Q: Where does rate control live, and why?</strong><br>
+      <strong>Phase 1:</strong> Consumer-side — producer runs at full speed, sink sleeps to match the profile. Keeps <code>OrderBook</code> decoupled from transport; swap profiles without touching book code.<br>
+      <strong>Phase 2:</strong> Per-symbol producer — each symbol throttles at the source. Consumer just drains. In both phases, a full channel blocks <code>send()</code> as a natural safety valve.
+    </div>
+  </div>
+</section>
+
+<!-- ─── SUMMARY Phase 1 vs Phase 2 ─── -->
+<section data-background-gradient="radial-gradient(ellipse at 40% 60%, #1a0800 0%, #0d0d0d 70%)">
+  <h2>Summary</h2>
+  <div class="grid-2" style="font-size:0.7em; margin-top:16px; text-align:left">
+    <div>
+      <p style="color:var(--rust); font-weight:bold; margin-bottom:6px">Phase 1 — Done</p>
+      <p><span class="green">✓</span> Producer/consumer, bounded channel, natural backpressure</p>
+      <p><span class="green">✓</span> 4 rate profiles — constant / sine / burst / ramp</p>
+      <p><span class="green">✓</span> No unsafe code · zero memory leaks</p>
+      <p><span class="green">✓</span> Rust ownership model eliminates data races and dangling pointers</p>
+    </div>
+    <div>
+      <p style="color:var(--accent); font-weight:bold; margin-bottom:6px">Phase 2 — Planned</p>
+      <p><span class="yellow">→</span> Per-symbol threads + CPU pinning → 500k+ qps</p>
+      <p><span class="yellow">→</span> Realistic sinks: ZMQ / WebSocket / FlatBuffers</p>
+      <p><span class="yellow">→</span> Observability: Prometheus metrics, P99 latency</p>
+      <p><span class="yellow">→</span> Replay true recorded data</p>
+    </div>
+  </div>
+  <hr style="border-color:var(--rust); margin:24px auto; width:160px">
+  <p style="color:#aaa; font-size:0.75em">
+    <code>cargo run --release -- config/config_burst.json</code>
+  </p>
+</section>
+
+</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/plugin/highlight/highlight.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c/t',
+    transition: 'slide',
+    transitionSpeed: 'fast',
+    controls: true,
+    progress: true,
+    plugins: [ RevealHighlight ]
+  });
+</script>
+</body>
+</html>
