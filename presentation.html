@@ -488,26 +488,57 @@ ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); })?;
   </div>
 </section>
 
-<!-- ─── SUMMARY Phase 1 vs Phase 2 ─── -->
+<!-- ─── PHASE 3 ─── -->
+<section data-background-gradient="radial-gradient(ellipse at 60% 40%, #0a1a0a 0%, #0d0d0d 70%)">
+  <h2>Phase 3 — Realistic Data</h2>
+  <div class="grid-2" style="font-size:0.6em; margin-top:16px; text-align:left">
+    <div>
+      <p style="color:#6ec97f; font-weight:bold; margin-bottom:8px">Market Microstructure</p>
+      <p>→ <b>Configurable spread per symbol</b> — BTC 0.5bps vs ALT 20bps; strategies see realistic transaction cost</p>
+      <p>→ <b>Fat-tail distribution (Student-t)</b> — Normal misses crash spikes; strategy must survive 5-sigma moves</p>
+      <p>→ <b>Symbol correlation</b> — BTC drop propagates to ETH/SOL</p>
+      <p>→ <b>Volume clustering</b> — bursts near open/close/news; exposes strategies that assume uniform flow</p>
+      <p>→ <b>Trade events + OB L2 quotes</b> — full market picture; strategies can track aggressive flow, not just quotes</p>
+    </div>
+    <div>
+      <p style="color:#6ec97f; font-weight:bold; margin-bottom:8px">Feed Protocol &amp; Persistence</p>
+      <p>→ <b>Snapshot on connect + delta stream</b> — real exchange protocol</p>
+      <p>→ <b>Sequence numbers</b> — subscriber detects missed messages </p>
+      <p>→ <b>Recorded replay from real tick data</b> — deterministic reruns; same market, same results every time</p>
+      <p>→ <b>Persistence to TimescaleDB</b> — backtester reads the same feed; no format conversion, no data loss between runs</p>
+      <p>→ <b>Multi-venue</b> — same symbol on 2 exchanges with different spreads; tests arbitrage and  (National) NBBO logic</p>
+    </div>
+  </div>
+  <div class="box" style="margin-top:16px; font-size:0.63em; color:#aaa">
+    Goal: feed a real strategy — not just stress-test infrastructure
+  </div>
+</section>
+
+<!-- ─── SUMMARY Phase 1 vs Phase 2 vs Phase 3 ─── -->
 <section data-background-gradient="radial-gradient(ellipse at 40% 60%, #1a0800 0%, #0d0d0d 70%)">
   <h2>Summary</h2>
-  <div class="grid-2" style="font-size:0.7em; margin-top:16px; text-align:left">
+  <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; font-size:0.65em; margin-top:16px; text-align:left">
     <div>
       <p style="color:var(--rust); font-weight:bold; margin-bottom:6px">Phase 1 — Done</p>
       <p><span class="green">✓</span> Producer/consumer, bounded channel, natural backpressure</p>
       <p><span class="green">✓</span> 4 rate profiles — constant / sine / burst / ramp</p>
       <p><span class="green">✓</span> No unsafe code · zero memory leaks</p>
-      <p><span class="green">✓</span> Rust ownership model eliminates data races and dangling pointers</p>
+      <p><span class="green">✓</span> Rust ownership model eliminates data races</p>
     </div>
     <div>
       <p style="color:var(--accent); font-weight:bold; margin-bottom:6px">Phase 2 — Planned</p>
       <p><span class="yellow">→</span> Per-symbol threads + CPU pinning → 500k+ qps</p>
       <p><span class="yellow">→</span> Realistic sinks: ZMQ / WebSocket / FlatBuffers</p>
       <p><span class="yellow">→</span> Observability: Prometheus metrics, P99 latency</p>
-      <p><span class="yellow">→</span> Replay true recorded data</p>
+    </div>
+    <div>
+      <p style="color:#6ec97f; font-weight:bold; margin-bottom:6px">Phase 3 — Realistic Data</p>
+      <p><span style="color:#6ec97f">→</span> Fat-tail distribution + symbol correlation</p>
+      <p><span style="color:#6ec97f">→</span> Snapshot + delta + sequence numbers</p>
+      <p><span style="color:#6ec97f">→</span> Recorded replay from real tick data</p>
     </div>
   </div>
-  <hr style="border-color:var(--rust); margin:24px auto; width:160px">
+  <hr style="border-color:var(--rust); margin:20px auto; width:160px">
   <p style="color:#aaa; font-size:0.75em">
     <code>cargo run --release -- config/config_burst.json</code>
   </p>
