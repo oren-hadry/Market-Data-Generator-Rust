@@ -514,6 +514,28 @@ ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); })?;
   </div>
 </section>
 
+<!-- ─── PHASE 4 ─── -->
+<section data-background-gradient="radial-gradient(ellipse at 50% 50%, #0a0010 0%, #0d0d0d 70%)">
+  <h2>Phase 4 — True HFT (&lt;1µs)</h2>
+  <div class="grid-2" style="font-size:0.6em; margin-top:16px; text-align:left">
+    <div>
+      <p style="color:#c792ea; font-weight:bold; margin-bottom:8px">Memory &amp; Data Structures</p>
+      <p>→ <b>SPSC ring buffer</b> — crossbeam is MPMC with extra atomics. SPSC has one writer, one reader → no false sharing</p>
+      <p style="margin-top:8px">→ <b>Flat array instead of BTreeMap</b> — BTreeMap scatters nodes on heap. Contiguous array → CPU fetches several levels per cache line</p>
+      <p style="margin-top:8px">→ <b>Zero heap allocation on hot path</b> — pre-allocate at startup, no <code>malloc</code> during trading</p>
+    </div>
+    <div>
+      <p style="color:#c792ea; font-weight:bold; margin-bottom:8px">OS &amp; Network</p>
+      <p>→ <b>isolcpus + SCHED_FIFO</b> — dedicated cores excluded from OS scheduler. No housekeeping threads, no IRQs, no preemption</p>
+      <p style="margin-top:8px">→ <b>mmap shared memory</b> — zero-copy, zero syscalls between processes</p>
+      <p style="margin-top:8px">→ <b>DPDK kernel bypass</b> — <code>send()</code> costs ~1µs in kernel. DPDK writes directly to NIC from userspace</p>
+    </div>
+  </div>
+  <div class="box" style="margin-top:16px; font-size:0.63em; color:#aaa">
+    Each change eliminates a specific latency source: false sharing · pointer chasing · scheduler jitter · kernel overhead
+  </div>
+</section>
+
 <!-- ─── SUMMARY Phase 1 vs Phase 2 vs Phase 3 ─── -->
 <section data-background-gradient="radial-gradient(ellipse at 40% 60%, #1a0800 0%, #0d0d0d 70%)">
   <h2>Summary</h2>
