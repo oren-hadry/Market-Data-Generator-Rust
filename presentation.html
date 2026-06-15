@@ -104,8 +104,7 @@
   <hr style="border-color:var(--rust); width:200px; margin:20px auto">
   <p style="color:#aaa; font-size:0.8em">
     Written in <span class="rust-color">Rust</span> &nbsp;·&nbsp;
-    Ported from C++ &nbsp;·&nbsp;
-    Phase 1 complete &nbsp;·&nbsp; Phase 2 in design
+    Phase 1 complete &nbsp;·&nbsp; Phase 2 - 4 in design
   </p>
   <div style="margin-top:30px">
     <span class="badge">crossbeam-channel</span>
@@ -119,13 +118,13 @@
 <section>
   <h2>Project Overview</h2>
   <div class="box" style="font-size:0.85em">
-    Generates a continuous <strong>data feed</strong> for configurable symbols, rate-limits output, and streams messages to stdout.
+    Generates a continuous <strong>data feeds</strong> with a configurable profiles, and streams messages to sinks.
   </div>
   <div class="grid-3" style="margin-top:24px">
     <div class="box" style="text-align:center">
       <div style="font-size:2em">📈</div>
       <strong>Market simulation</strong><br>
-      <span class="dim">Recorded or synthethic random-walk, multiple streams</span>
+      <span class="dim">Synthetic random-walk (Normal → Student-t in Phase 3)</span>
     </div>
     <div class="box" style="text-align:center">
       <div style="font-size:2em">⚡</div>
@@ -135,7 +134,7 @@
     <div class="box" style="text-align:center">
       <div style="font-size:2em">📡</div>
       <strong>Data streams</strong><br>
-      <span class="dim">Orderbook L2, Trades, BBO</span>
+      <span class="dim">Orderbook L2, Trades, BBO, Funding rates etc.</span>
     </div>
   </div>
   <p style="font-size:0.7em; color:#888; margin-top:18px">
@@ -155,13 +154,16 @@ ts,sym,side,price,size,id
 1717430400000380,ETHUSD,ask,3401.00000,2.9900,8</code></pre>
 
 
-  <div style="margin-top:16px; font-size:0.78em; display:grid; grid-template-columns:1fr 1fr; gap:8px 40px; text-align:left">
+  <div style="margin-top:16px; font-size:0.7em; display:grid; grid-template-columns:1fr 1fr; gap:8px 40px; text-align:left">
     <div><code>ts</code> &nbsp;<span class="dim">— microsecond timestamp</span></div>
     <div><code>price</code> &nbsp;<span class="dim">— OrderedFloat&lt;f64&gt;</span></div>
     <div><code>symbol</code> &nbsp;<span class="dim">— enum</span></div>
     <div><code>size</code> &nbsp;<span class="dim">— quantity at level</span></div>
     <div><code>side</code> &nbsp;<span class="dim">— bid or ask</span></div>
     <div><code>id</code> &nbsp;<span class="dim">— 0–99, cycling per sym/side</span></div>
+  </div>
+  <div style="margin-top:8px; font-size:0.7em; text-align:left">
+    <code>[sequence_id, message_type, exchange_id]</code> &nbsp;<span class="dim">— Phase 3: gap detection, OB/Trade/BBO, multi-venue</span>
   </div>
 </section>
 
@@ -178,13 +180,14 @@ ts,sym,side,price,size,id
     ├── <span style="color:#c792ea">BookSide [bid]  BTreeMap&lt;OrderedFloat&lt;f64&gt;, BookLevel&gt;</span>  <span style="color:#e8e8e8">── O(log N), max 100 levels</span>
     └── <span style="color:#c792ea">BookSide [ask]  BTreeMap&lt;OrderedFloat&lt;f64&gt;, BookLevel&gt;</span>  <span style="color:#e8e8e8">── sorted for fast pruning</span>
     │
-    │  <span style="color:#c792ea">Sender&lt;QuoteUpdate&gt;.send()</span>
+    │  <span style="color:#c792ea">Sender&lt;QuoteUpdate&gt;.send() (per side)</span>
     ▼
-<span style="color:#c792ea">crossbeam_channel::bounded&lt;QuoteUpdate, 256&gt;</span>  <span style="color:#e8e8e8">← shared memory buffer, backpressure when full</span>
+<span style="color:#c792ea">crossbeam_channel::bounded&lt;QuoteUpdate, 256&gt;</span>  <span style="color:#e8e8e8">← shared memory buffer (MPMC), backpressure when full</span>
     │
     ▼
 <span style="color:#e8e8e8">[ Thread 2: Consumer ]</span>
-    ├── <span style="color:#c792ea">RateController</span>  <span style="color:#e8e8e8">── sleep(duration) per profile</span>
+    ├── <span style="color:#c792ea">try_recv() + spin_loop()</span>  <span style="color:#e8e8e8">── busy-wait when channel empty (low latency)</span>
+    ├── <span style="color:#c792ea">RateController</span>  <span style="color:#e8e8e8">── sleep(duration) after each emit (rate pacing)</span>
     └── <span style="color:#c792ea">Vec&lt;Box&lt;dyn Sink&gt;&gt;</span>
          └── <span style="color:#c792ea">StdoutSink</span>  <span style="color:#e8e8e8">── CSV</span></code></pre>
   <p style="font-size:0.65em; color:#888; margin-top:10px">
@@ -199,13 +202,13 @@ ts,sym,side,price,size,id
     <tr><th>File</th><th>Responsibility</th></tr>
     <tr><td><code>types.rs</code></td><td>Config, MarketEvent, QuoteUpdate, BookLevel, Side, RateProfile</td></tr>
     <tr><td><code>config.rs</code></td><td>serde_json config loader</td></tr>
+    <tr><td><code>engine.rs</code></td><td>Wires threads + Arc&lt;AtomicBool&gt; running flag</td></tr>
     <tr><td><code>generator.rs</code></td><td>InputGenerator trait; SyntheticGenerator — random-walk + cycling ids</td></tr>
-    <tr><td><code>book_side.rs</code></td><td>Price-keyed half book; O(1) id→price reverse map (id_to_price: HashMap)</td></tr>
-    <tr><td><code>order_book.rs</code></td><td>Owns [bid + ask] BookSides; routes events</td></tr>
     <tr><td><code>books_manager.rs</code></td><td>HashMap&lt;sym, OrderBook&gt;; routes MarketEvent</td></tr>
+    <tr><td><code>order_book.rs</code></td><td>Owns [bid + ask] BookSides; routes events</td></tr>
+    <tr><td><code>book_side.rs</code></td><td>Price-keyed half book; O(1) id→price reverse map (id_to_price: HashMap)</td></tr>
     <tr><td><code>rate_controller.rs</code></td><td>Sleep duration for sine / constant / burst / ramp</td></tr>
     <tr><td><code>sink.rs</code></td><td>Sink trait; StdoutSink CSV impl</td></tr>
-    <tr><td><code>engine.rs</code></td><td>Wires threads + Arc&lt;AtomicBool&gt; running flag</td></tr>
   </table>
 </section>
 
@@ -328,8 +331,8 @@ ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); })?;
   "max_rate": 10000.0,
   "initial_mid_prices": {
     "BTCUSD": 65000.0,
-    "ETHUSD":  3400.0,
-    "ETHBTC":     0.052
+    "ETHUSD": 3400.0,
+    "ETHBTC": 0.052
   }
 }</code></pre>
     <pre><code class="json">// config_ramp.json
@@ -341,8 +344,8 @@ ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); })?;
   "max_rate": 10000.0,
   "initial_mid_prices": {
     "BTCUSD": 65000.0,
-    "ETHUSD":  3400.0,
-    "ETHBTC":     0.052
+    "ETHUSD": 3400.0,
+    "ETHBTC": 0.052
   }
 }</code></pre>
   </div>
@@ -374,8 +377,8 @@ ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); })?;
   <section>
     <h2>Phase 2 — What's Next</h2>
     <p style="color:#aaa; font-size:0.75em">click ↓ for details</p>
-    <div class="grid-2" style="font-size:0.7em; margin-top:16px">
-      <div class="box">🧵 Per-symbol producer threads<br><span class="dim">1 thread + 1 channel per symbol</span></div>
+    <div class="grid-2" style="font-size:0.65em; margin-top:16px">
+      <div class="box">🧵 Per-symbol producer threads<br><span class="dim">1 thread + 1 channel per symbol — thread pool; sharded by volatility</span></div>
       <div class="box">📌 CPU pinning<br><span class="dim">core_affinity crate, no scheduler jitter</span></div>
       <div class="box">🔌 Multiple output sinks<br><span class="dim">ZMQ PUB · WebSocket · FlatBuffers</span></div>
       <div class="box">📼 Recorded replay<br><span class="dim">real historical L2 data, time-scaled</span></div>
@@ -450,7 +453,7 @@ ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); })?;
 <!-- ─── ARCHITECTURE PHASE 2 ─── -->
 <section>
   <h2>Architecture — Phase 2</h2>
-  <pre class="r-stretch"><code class="nohighlight" data-noescape style="font-size:0.6em; line-height:1.6"><span style="color:#e8e8e8">[ Thread 1: Producer BTCUSD ]</span>  <span style="color:#c792ea">RateController[BTC]</span>  →  <span style="color:#c792ea">bounded&lt;BTCUSD&gt;</span>  ─┐
+  <pre class="r-stretch"><code class="nohighlight" data-noescape style="font-size:0.7em; line-height:1.6"><span style="color:#e8e8e8">[ Thread 1: Producer BTCUSD ]</span>  <span style="color:#c792ea">RateController[BTC]</span>  →  <span style="color:#c792ea">bounded&lt;BTCUSD&gt;</span>  ─┐
 <span style="color:#e8e8e8">[ Thread 2: Producer ETHUSD ]</span>  <span style="color:#c792ea">RateController[ETH]</span>  →  <span style="color:#c792ea">bounded&lt;ETHUSD&gt;</span>  ─┤
 <span style="color:#e8e8e8">[ Thread 3: Producer ETHBTC ]</span>  <span style="color:#c792ea">RateController[EBT]</span>  →  <span style="color:#c792ea">bounded&lt;ETHBTC&gt;</span>  ─┘
     │
